@@ -3,5 +3,4 @@ services:
     image: ghcr.io/webutan/lain:latest
     container_name: japanese-learning-bot
     restart: unless-stopped
-    env_file:
-      - .env
+    # Set DISCORD_TOKEN in your Docker GUI or .env file
