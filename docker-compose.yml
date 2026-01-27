@@ -1,6 +1,6 @@
 services:
   bot:
-    build: .
+    image: ghcr.io/webutan/lain:latest
     container_name: japanese-learning-bot
     restart: unless-stopped
     env_file:
