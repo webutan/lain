@@ -662,7 +662,7 @@ bot = JapaneseLearningBot()
 # Daily diary task - runs at 10 PM Japan time
 @tasks.loop(time=time(hour=22, minute=0, tzinfo=JAPAN_TZ))
 async def daily_diary_task():
-    """Create a daily diary thread at 10 PM Japan time"""
+    """Create a daily diary post at 10 PM Japan time"""
     channel = bot.get_channel(DIARY_CHANNEL_ID)
     if not channel:
         print(f"Diary channel {DIARY_CHANNEL_ID} not found")
@@ -673,31 +673,40 @@ async def daily_diary_task():
     date_str = japan_now.strftime("%Y年%m月%d日")
     date_str_en = japan_now.strftime("%B %d, %Y")
 
-    # Create thread with the date as the name
+    # Thread/post name
     thread_name = f"📔 {date_str} / {date_str_en}"
 
+    # The diary prompt message
+    message = (
+        f"<@&{DIARY_ROLE_ID}>\n\n"
+        "**Time for today's diary!**\n"
+        "Talk about your day, what you learned, or anything interesting that may have happened today. "
+        "This diary is for language learning, so try to use any words, grammar functions, etc. that you may have learned.\n\n"
+        "**今日の日記の時間です！**\n"
+        "今日あったこと、学んだこと、面白かったことなどを書いてみましょう。"
+        "この日記は語学学習のためのものなので、学んだ単語や文法などを使ってみてください。"
+    )
+
     try:
-        thread = await channel.create_thread(
-            name=thread_name,
-            type=discord.ChannelType.public_thread,
-        )
-
-        # Send the diary prompt with role ping
-        message = (
-            f"<@&{DIARY_ROLE_ID}>\n\n"
-            "**Time for today's diary!**\n"
-            "Talk about your day, what you learned, or anything interesting that may have happened today. "
-            "This diary is for language learning, so try to use any words, grammar functions, etc. that you may have learned.\n\n"
-            "**今日の日記の時間です！**\n"
-            "今日あったこと、学んだこと、面白かったことなどを書いてみましょう。"
-            "この日記は語学学習のためのものなので、学んだ単語や文法などを使ってみてください。"
-        )
-
-        await thread.send(message)
-        print(f"Created diary thread: {thread_name}")
+        # Check if it's a forum channel
+        if isinstance(channel, discord.ForumChannel):
+            # For forum channels, create a post (thread with initial message)
+            thread, initial_message = await channel.create_thread(
+                name=thread_name,
+                content=message,
+            )
+            print(f"Created diary forum post: {thread_name}")
+        else:
+            # For regular text channels, create a thread
+            thread = await channel.create_thread(
+                name=thread_name,
+                type=discord.ChannelType.public_thread,
+            )
+            await thread.send(message)
+            print(f"Created diary thread: {thread_name}")
 
     except Exception as e:
-        print(f"Failed to create diary thread: {e}")
+        print(f"Failed to create diary thread/post: {e}")
 
 
 @daily_diary_task.before_loop
