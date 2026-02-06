@@ -23,18 +23,28 @@ if Path("/app").exists():
     DATA_DIR = Path("/app/data")
 else:
     DATA_DIR = Path(__file__).parent
-DATA_DIR.mkdir(parents=True, exist_ok=True)
 MEMO_FILE = DATA_DIR / "memos.json"
+
+
+def init_data_storage():
+    """Initialize data storage directory and files on startup"""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    if not MEMO_FILE.exists():
+        with open(MEMO_FILE, 'w', encoding='utf-8') as f:
+            json.dump({}, f)
+        print(f"Initialized memo storage: {MEMO_FILE}")
+
+
+# Initialize storage on module load
+init_data_storage()
 
 
 def load_memos():
     """Load memos from JSON file"""
-    if not MEMO_FILE.exists():
-        return {}
     try:
         with open(MEMO_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
-    except (json.JSONDecodeError, IOError):
+    except (json.JSONDecodeError, IOError, FileNotFoundError):
         return {}
 
 
