@@ -2,6 +2,7 @@ import os
 import re
 import random
 import asyncio
+import json
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
 import aiohttp
@@ -12,6 +13,65 @@ from dotenv import load_dotenv
 from pathlib import Path
 
 load_dotenv()
+
+
+# ============ Memo Storage ============
+
+# Use /app/data for Docker volume persistence, fallback to current dir for local dev
+# Check if we're in Docker by looking for /app directory
+if Path("/app").exists():
+    DATA_DIR = Path("/app/data")
+else:
+    DATA_DIR = Path(__file__).parent
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+MEMO_FILE = DATA_DIR / "memos.json"
+
+
+def load_memos():
+    """Load memos from JSON file"""
+    if not MEMO_FILE.exists():
+        return {}
+    try:
+        with open(MEMO_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return {}
+
+
+def save_memos(memos):
+    """Save memos to JSON file"""
+    with open(MEMO_FILE, 'w', encoding='utf-8') as f:
+        json.dump(memos, f, ensure_ascii=False, indent=2)
+
+
+def get_user_memos(user_id):
+    """Get memos for a specific user"""
+    memos = load_memos()
+    return memos.get(str(user_id), [])
+
+
+def add_user_memo(user_id, memo_entry):
+    """Add a memo for a specific user"""
+    memos = load_memos()
+    user_id_str = str(user_id)
+    if user_id_str not in memos:
+        memos[user_id_str] = []
+    memos[user_id_str].append(memo_entry)
+    save_memos(memos)
+
+
+def delete_user_memo(user_id, index):
+    """Delete a memo by index for a specific user. Returns True if successful."""
+    memos = load_memos()
+    user_id_str = str(user_id)
+    if user_id_str not in memos:
+        return False
+    user_memos = memos[user_id_str]
+    if index < 0 or index >= len(user_memos):
+        return False
+    del user_memos[index]
+    save_memos(memos)
+    return True
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
@@ -864,6 +924,15 @@ async def help_command(interaction: discord.Interaction):
         "**/translate** `last` - Translate the previous message"
     )
     embed.add_field(name="Lookup / 検索", value=lookup, inline=False)
+
+    # Memo section
+    memo_help = (
+        "**/memo** `<word>` - Save a word/phrase to your memo (+ Jisho lookup)\n"
+        "**/memo_last** - Save the last message to your memo\n"
+        "**/mymemo** - View your saved memos\n"
+        "**/memo_delete** `<#>` - Delete a memo by number"
+    )
+    embed.add_field(name="Memo / メモ", value=memo_help, inline=False)
 
     # Immersion section
     immersion = (
@@ -2677,6 +2746,210 @@ async def jisho_lookup(interaction: discord.Interaction, word: str):
     )
 
     await interaction.followup.send(embed=embed)
+
+
+# ============ Personal Memo System ============
+
+@bot.tree.command(name="memo", description="Save a word or phrase to your personal memo / 単語やフレーズをメモに保存")
+@app_commands.describe(text="The word or phrase to save / 保存する単語やフレーズ")
+async def memo(interaction: discord.Interaction, text: str):
+    """Save a word or phrase to personal memo, with Jisho lookup if found"""
+    await interaction.response.defer(ephemeral=True)
+
+    memo_entry = {
+        "text": text,
+        "timestamp": datetime.now().isoformat(),
+        "definition": None
+    }
+
+    # Try to look up in Jisho
+    data = await jisho_search(text)
+    if data and data.get('data'):
+        first_result = data['data'][0]
+        formatted = format_jisho_entry(first_result)
+        if formatted:
+            memo_entry["definition"] = {
+                "word": formatted["word"],
+                "reading": formatted["reading"],
+                "definitions": formatted["definitions"][:3]  # Save top 3 definitions
+            }
+
+    add_user_memo(interaction.user.id, memo_entry)
+
+    # Build response
+    if memo_entry["definition"]:
+        defn = memo_entry["definition"]
+        reading_str = f" ({defn['reading']})" if defn['reading'] else ""
+        defs_str = "\n".join(f"• {d}" for d in defn['definitions'])
+        embed = discord.Embed(
+            title="📝 Memo Saved / メモ保存完了",
+            description=f"**{defn['word']}**{reading_str}\n\n{defs_str}",
+            color=discord.Color.green()
+        )
+    else:
+        embed = discord.Embed(
+            title="📝 Memo Saved / メモ保存完了",
+            description=f"**{text}**\n\n*(No dictionary entry found / 辞書に見つかりませんでした)*",
+            color=discord.Color.green()
+        )
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="memo_last", description="Save the last message in this channel to your memo / 直前のメッセージをメモに保存")
+async def memo_last(interaction: discord.Interaction):
+    """Save the last message in the channel to personal memo"""
+    await interaction.response.defer(ephemeral=True)
+
+    # Get the last message in the channel (excluding the interaction)
+    last_message = None
+    async for msg in interaction.channel.history(limit=5):
+        # Skip bot messages and the command itself
+        if not msg.author.bot and msg.content:
+            last_message = msg
+            break
+
+    if not last_message:
+        await interaction.followup.send("No recent message found to memo. / メモする直近のメッセージが見つかりませんでした。", ephemeral=True)
+        return
+
+    text = last_message.content
+
+    memo_entry = {
+        "text": text,
+        "timestamp": datetime.now().isoformat(),
+        "definition": None,
+        "source": f"From {last_message.author.display_name}"
+    }
+
+    # Try to look up in Jisho (only if it's a single word/short phrase)
+    if len(text.split()) <= 3 and len(text) <= 30:
+        data = await jisho_search(text)
+        if data and data.get('data'):
+            first_result = data['data'][0]
+            formatted = format_jisho_entry(first_result)
+            if formatted:
+                memo_entry["definition"] = {
+                    "word": formatted["word"],
+                    "reading": formatted["reading"],
+                    "definitions": formatted["definitions"][:3]
+                }
+
+    add_user_memo(interaction.user.id, memo_entry)
+
+    # Build response
+    embed = discord.Embed(
+        title="📝 Memo Saved / メモ保存完了",
+        color=discord.Color.green()
+    )
+
+    # Truncate if too long for display
+    display_text = text if len(text) <= 200 else text[:200] + "..."
+    embed.add_field(name="Saved / 保存内容", value=display_text, inline=False)
+
+    if memo_entry.get("definition"):
+        defn = memo_entry["definition"]
+        reading_str = f" ({defn['reading']})" if defn['reading'] else ""
+        defs_str = "\n".join(f"• {d}" for d in defn['definitions'])
+        embed.add_field(name="Dictionary / 辞書", value=f"**{defn['word']}**{reading_str}\n{defs_str}", inline=False)
+
+    embed.set_footer(text=f"From {last_message.author.display_name}")
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="mymemo", description="View your saved memos / 保存したメモを表示")
+async def mymemo(interaction: discord.Interaction):
+    """Display all saved memos for the user"""
+    await interaction.response.defer(ephemeral=True)
+
+    user_memos = get_user_memos(interaction.user.id)
+
+    if not user_memos:
+        embed = discord.Embed(
+            title="📒 Your Memos / あなたのメモ",
+            description="You don't have any memos yet.\nUse `/memo <word>` or `/memo_last` to save something!\n\nまだメモがありません。\n`/memo <単語>` か `/memo_last` で保存しましょう！",
+            color=discord.Color.blue()
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        return
+
+    # Build memo list (paginated if needed, show last 15 for now)
+    display_memos = user_memos[-15:]  # Show most recent 15
+    total_count = len(user_memos)
+
+    description = ""
+    start_idx = total_count - len(display_memos)
+
+    for i, memo_entry in enumerate(display_memos):
+        idx = start_idx + i + 1  # 1-indexed for display
+        text = memo_entry.get("text", "")
+        display_text = text if len(text) <= 50 else text[:50] + "..."
+
+        if memo_entry.get("definition"):
+            defn = memo_entry["definition"]
+            word = defn.get("word", text)
+            reading = f" ({defn.get('reading')})" if defn.get("reading") else ""
+            first_def = defn["definitions"][0] if defn.get("definitions") else ""
+            first_def_short = first_def if len(first_def) <= 40 else first_def[:40] + "..."
+            description += f"`{idx}.` **{word}**{reading} - {first_def_short}\n"
+        else:
+            description += f"`{idx}.` {display_text}\n"
+
+    embed = discord.Embed(
+        title=f"📒 Your Memos / あなたのメモ ({total_count} total)",
+        description=description,
+        color=discord.Color.blue()
+    )
+
+    if total_count > 15:
+        embed.set_footer(text=f"Showing most recent 15 of {total_count} memos")
+
+    embed.add_field(
+        name="💡 Tip",
+        value="Use `/memo_delete <number>` to remove a memo\n`/memo_delete <番号>` でメモを削除",
+        inline=False
+    )
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="memo_delete", description="Delete a memo by number / 番号でメモを削除")
+@app_commands.describe(number="The memo number to delete (from /mymemo) / 削除するメモの番号")
+async def memo_delete(interaction: discord.Interaction, number: int):
+    """Delete a memo by its number"""
+    await interaction.response.defer(ephemeral=True)
+
+    user_memos = get_user_memos(interaction.user.id)
+
+    if not user_memos:
+        await interaction.followup.send("You don't have any memos to delete. / 削除するメモがありません。", ephemeral=True)
+        return
+
+    # Convert 1-indexed display number to 0-indexed
+    index = number - 1
+
+    if index < 0 or index >= len(user_memos):
+        await interaction.followup.send(
+            f"Invalid memo number. You have {len(user_memos)} memo(s). Use `/mymemo` to see the list.\n"
+            f"無効な番号です。{len(user_memos)}件のメモがあります。`/mymemo` でリストを確認してください。",
+            ephemeral=True
+        )
+        return
+
+    # Get the memo before deleting for confirmation message
+    deleted_memo = user_memos[index]
+    deleted_text = deleted_memo.get("text", "")[:50]
+
+    if delete_user_memo(interaction.user.id, index):
+        embed = discord.Embed(
+            title="🗑️ Memo Deleted / メモ削除完了",
+            description=f"Deleted: **{deleted_text}**{'...' if len(deleted_memo.get('text', '')) > 50 else ''}",
+            color=discord.Color.orange()
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    else:
+        await interaction.followup.send("Failed to delete memo. / メモの削除に失敗しました。", ephemeral=True)
 
 
 # ============ Translation ============

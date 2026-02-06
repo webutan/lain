@@ -1,6 +1,11 @@
 services:
   bot:
-    image: ghcr.io/webutan/lain:latest
+    image: webutan/lain:latest
     container_name: japanese-learning-bot
     restart: unless-stopped
+    volumes:
+      - bot-data:/app/data
     # Set DISCORD_TOKEN in your Docker GUI or .env file
+
+volumes:
+  bot-data:
