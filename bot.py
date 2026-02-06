@@ -2621,19 +2621,30 @@ async def pitch_lookup(interaction: discord.Interaction, word: str):
         color=discord.Color.purple()
     )
 
-    # Add audio if available
-    if audio_url:
-        # Jotoba audio URLs are relative, need full path
-        full_audio_url = f"https://jotoba.de{audio_url}" if audio_url.startswith('/') else audio_url
-        embed.add_field(
-            name="Audio / 音声",
-            value=f"[Listen / 聞く]({full_audio_url})",
-            inline=False
-        )
-
     embed.set_footer(text="Data from Jotoba.de")
 
-    await interaction.followup.send(embed=embed)
+    # Download and attach audio if available
+    audio_file = None
+    if audio_url:
+        full_audio_url = f"https://jotoba.de{audio_url}" if audio_url.startswith('/') else audio_url
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(full_audio_url) as response:
+                    if response.status == 200:
+                        import io
+                        audio_data = await response.read()
+                        # Create a discord.File from the audio data
+                        audio_file = discord.File(
+                            io.BytesIO(audio_data),
+                            filename=f"{kana}.mp3"
+                        )
+        except Exception as e:
+            print(f"Failed to download audio: {e}")
+
+    if audio_file:
+        await interaction.followup.send(embed=embed, file=audio_file)
+    else:
+        await interaction.followup.send(embed=embed)
 
 
 # ============ Jisho Word Lookup ============
