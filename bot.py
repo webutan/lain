@@ -715,6 +715,56 @@ async def before_daily_diary():
     await bot.wait_until_ready()
 
 
+@bot.tree.command(name="test_diary", description="Create a test diary post (for testing purposes)")
+async def test_diary(interaction: discord.Interaction):
+    """Manually trigger a diary post for testing"""
+    await interaction.response.defer(ephemeral=True)
+
+    channel = bot.get_channel(DIARY_CHANNEL_ID)
+    if not channel:
+        await interaction.followup.send(f"Diary channel {DIARY_CHANNEL_ID} not found", ephemeral=True)
+        return
+
+    # Get current time in Japan timezone
+    japan_now = datetime.now(JAPAN_TZ)
+    date_str = japan_now.strftime("%Y年%m月%d日")
+    date_str_en = japan_now.strftime("%B %d, %Y")
+    time_str = japan_now.strftime("%H:%M")
+
+    # Thread/post name (with TEST prefix and time to avoid duplicates)
+    thread_name = f"🧪 TEST {date_str} {time_str}"
+
+    # The diary prompt message
+    message = (
+        f"<@&{DIARY_ROLE_ID}>\n\n"
+        "**Time for today's diary!**\n"
+        "Talk about your day, what you learned, or anything interesting that may have happened today. "
+        "This diary is for language learning, so try to use any words, grammar functions, etc. that you may have learned.\n\n"
+        "**今日の日記の時間です！**\n"
+        "今日あったこと、学んだこと、面白かったことなどを書いてみましょう。"
+        "この日記は語学学習のためのものなので、学んだ単語や文法などを使ってみてください。"
+    )
+
+    try:
+        # Check if it's a forum channel
+        if isinstance(channel, discord.ForumChannel):
+            thread, initial_message = await channel.create_thread(
+                name=thread_name,
+                content=message,
+            )
+            await interaction.followup.send(f"Created test forum post: {thread_name}", ephemeral=True)
+        else:
+            thread = await channel.create_thread(
+                name=thread_name,
+                type=discord.ChannelType.public_thread,
+            )
+            await thread.send(message)
+            await interaction.followup.send(f"Created test thread: {thread_name}", ephemeral=True)
+
+    except Exception as e:
+        await interaction.followup.send(f"Failed to create test post: {e}", ephemeral=True)
+
+
 # Daily Waaduru reset task - runs at midnight Japan time
 @tasks.loop(time=time(hour=0, minute=0, tzinfo=JAPAN_TZ))
 async def daily_waaduru_reset_task():
