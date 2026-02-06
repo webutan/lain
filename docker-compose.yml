@@ -5,6 +5,8 @@ services:
     restart: unless-stopped
     volumes:
       - bot-data:/app/data
+    ports:
+      - "8765:8765"  # Anki sync API
     # Set DISCORD_TOKEN in your Docker GUI or .env file
 
 volumes:

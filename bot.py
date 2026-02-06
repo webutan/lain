@@ -83,6 +83,115 @@ def delete_user_memo(user_id, index):
     save_memos(memos)
     return True
 
+
+# ============ Anki Sync Storage ============
+
+ANKI_TOKENS_FILE = DATA_DIR / "anki_tokens.json"
+ANKI_PENDING_FILE = DATA_DIR / "anki_pending.json"
+
+
+def init_anki_storage():
+    """Initialize Anki sync storage files"""
+    if not ANKI_TOKENS_FILE.exists():
+        with open(ANKI_TOKENS_FILE, 'w', encoding='utf-8') as f:
+            json.dump({}, f)
+    if not ANKI_PENDING_FILE.exists():
+        with open(ANKI_PENDING_FILE, 'w', encoding='utf-8') as f:
+            json.dump({}, f)
+
+
+init_anki_storage()
+
+
+def load_anki_tokens():
+    """Load user tokens for Anki sync"""
+    try:
+        with open(ANKI_TOKENS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError, FileNotFoundError):
+        return {}
+
+
+def save_anki_tokens(tokens):
+    """Save user tokens"""
+    with open(ANKI_TOKENS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(tokens, f, ensure_ascii=False, indent=2)
+
+
+def generate_user_token(user_id):
+    """Generate a unique token for a user"""
+    import secrets
+    token = secrets.token_urlsafe(32)
+    tokens = load_anki_tokens()
+    # Store both mappings: token -> user_id and user_id -> token
+    tokens[token] = str(user_id)
+    tokens[f"user_{user_id}"] = token
+    save_anki_tokens(tokens)
+    return token
+
+
+def get_user_by_token(token):
+    """Get user ID from token"""
+    tokens = load_anki_tokens()
+    return tokens.get(token)
+
+
+def get_token_by_user(user_id):
+    """Get token for a user"""
+    tokens = load_anki_tokens()
+    return tokens.get(f"user_{user_id}")
+
+
+def load_anki_pending():
+    """Load pending Anki cards"""
+    try:
+        with open(ANKI_PENDING_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError, FileNotFoundError):
+        return {}
+
+
+def save_anki_pending(pending):
+    """Save pending Anki cards"""
+    with open(ANKI_PENDING_FILE, 'w', encoding='utf-8') as f:
+        json.dump(pending, f, ensure_ascii=False, indent=2)
+
+
+def add_pending_card(user_id, card_data):
+    """Add a card to user's pending queue"""
+    pending = load_anki_pending()
+    user_id_str = str(user_id)
+    if user_id_str not in pending:
+        pending[user_id_str] = []
+    # Add unique ID to card
+    card_data['id'] = secrets.token_hex(8)
+    pending[user_id_str].append(card_data)
+    save_anki_pending(pending)
+    return card_data['id']
+
+
+def get_pending_cards(user_id):
+    """Get pending cards for a user"""
+    pending = load_anki_pending()
+    return pending.get(str(user_id), [])
+
+
+def clear_pending_cards(user_id, card_ids=None):
+    """Clear pending cards for a user. If card_ids provided, only clear those."""
+    pending = load_anki_pending()
+    user_id_str = str(user_id)
+    if user_id_str not in pending:
+        return
+    if card_ids is None:
+        pending[user_id_str] = []
+    else:
+        pending[user_id_str] = [c for c in pending[user_id_str] if c.get('id') not in card_ids]
+    save_anki_pending(pending)
+
+
+# Import secrets for token generation
+import secrets
+
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 
@@ -943,6 +1052,16 @@ async def help_command(interaction: discord.Interaction):
         "**/memo_delete** `<#>` - Delete a memo by number"
     )
     embed.add_field(name="Memo / メモ", value=memo_help, inline=False)
+
+    # Anki section
+    anki_help = (
+        "**/anki_setup** - Get your Anki sync token\n"
+        "**/anki_add** `<#>` - Add memo to Anki queue\n"
+        "**/anki_add** `all` - Add all memos to queue\n"
+        "**/anki_pending** - View pending cards\n"
+        "**/anki_clear** - Clear pending cards"
+    )
+    embed.add_field(name="Anki Sync / Anki同期", value=anki_help, inline=False)
 
     # Immersion section
     immersion = (
@@ -3207,8 +3326,293 @@ async def immersion_status(interaction: discord.Interaction):
 bot.tree.add_command(immersion_group)
 
 
+# ============ Anki Sync Commands ============
+
+@bot.tree.command(name="anki_setup", description="Set up Anki sync - get your personal token / Anki同期の設定")
+async def anki_setup(interaction: discord.Interaction):
+    """Generate or show the user's Anki sync token"""
+    existing_token = get_token_by_user(interaction.user.id)
+
+    if existing_token:
+        token = existing_token
+        message = "Here's your existing Anki sync token:"
+    else:
+        token = generate_user_token(interaction.user.id)
+        message = "Your new Anki sync token has been generated:"
+
+    embed = discord.Embed(
+        title="🔗 Anki Sync Setup / Anki同期設定",
+        description=(
+            f"{message}\n\n"
+            f"```{token}```\n\n"
+            "**Setup instructions / 設定手順:**\n"
+            "1. Install the Anki plugin (see server resources)\n"
+            "2. In Anki: Tools → Lain Sync Settings\n"
+            "3. Enter this token and your server URL\n"
+            "4. Cards will sync automatically when Anki is open!\n\n"
+            "⚠️ Keep this token private! / このトークンは秘密にしてください！"
+        ),
+        color=discord.Color.green()
+    )
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="anki_add", description="Add memo(s) to Anki sync queue / メモをAnki同期キューに追加")
+@app_commands.describe(
+    memo_number="Memo number to add, or 'all' for all memos / メモ番号、または'all'で全て"
+)
+async def anki_add(interaction: discord.Interaction, memo_number: str):
+    """Add memos to the Anki sync queue"""
+    await interaction.response.defer(ephemeral=True)
+
+    # Check if user has a token
+    if not get_token_by_user(interaction.user.id):
+        await interaction.followup.send(
+            "Please run `/anki_setup` first to get your sync token.\n"
+            "まず `/anki_setup` を実行してトークンを取得してください。",
+            ephemeral=True
+        )
+        return
+
+    user_memos = get_user_memos(interaction.user.id)
+
+    if not user_memos:
+        await interaction.followup.send(
+            "You don't have any memos. Use `/memo` to save some first!\n"
+            "メモがありません。まず `/memo` で保存してください！",
+            ephemeral=True
+        )
+        return
+
+    cards_added = []
+
+    if memo_number.lower() == 'all':
+        # Add all memos
+        for i, memo in enumerate(user_memos):
+            card = create_anki_card_from_memo(memo, i + 1)
+            add_pending_card(interaction.user.id, card)
+            cards_added.append(card['front'])
+    else:
+        # Add specific memo
+        try:
+            idx = int(memo_number) - 1
+            if idx < 0 or idx >= len(user_memos):
+                await interaction.followup.send(
+                    f"Invalid memo number. You have {len(user_memos)} memo(s).\n"
+                    f"無効な番号です。{len(user_memos)}件のメモがあります。",
+                    ephemeral=True
+                )
+                return
+
+            memo = user_memos[idx]
+            card = create_anki_card_from_memo(memo, idx + 1)
+            add_pending_card(interaction.user.id, card)
+            cards_added.append(card['front'])
+
+        except ValueError:
+            await interaction.followup.send(
+                "Please enter a memo number or 'all'.\n"
+                "メモ番号か 'all' を入力してください。",
+                ephemeral=True
+            )
+            return
+
+    embed = discord.Embed(
+        title="📤 Added to Anki Queue / Ankiキューに追加",
+        description=(
+            f"**{len(cards_added)} card(s) queued:**\n" +
+            "\n".join(f"• {card}" for card in cards_added[:10]) +
+            (f"\n... and {len(cards_added) - 10} more" if len(cards_added) > 10 else "") +
+            "\n\nCards will sync when Anki is open with the plugin!\n"
+            "Ankiとプラグインを開くと同期されます！"
+        ),
+        color=discord.Color.blue()
+    )
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+def create_anki_card_from_memo(memo, memo_number):
+    """Create an Anki card dict from a memo entry"""
+    text = memo.get('text', '')
+    definition = memo.get('definition')
+
+    front = text
+    back_parts = []
+
+    if definition:
+        word = definition.get('word', text)
+        reading = definition.get('reading', '')
+        definitions = definition.get('definitions', [])
+
+        front = word
+        if reading:
+            back_parts.append(f"<b>Reading:</b> {reading}")
+        if definitions:
+            back_parts.append("<b>Definitions:</b>")
+            for i, d in enumerate(definitions[:5], 1):
+                back_parts.append(f"{i}. {d}")
+    else:
+        back_parts.append(text)
+
+    back = "<br>".join(back_parts)
+
+    return {
+        'front': front,
+        'back': back,
+        'memo_number': memo_number
+    }
+
+
+@bot.tree.command(name="anki_pending", description="Show pending Anki cards / 保留中のAnkiカードを表示")
+async def anki_pending(interaction: discord.Interaction):
+    """Show cards waiting to sync"""
+    pending = get_pending_cards(interaction.user.id)
+
+    if not pending:
+        embed = discord.Embed(
+            title="📭 No Pending Cards / 保留中のカードなし",
+            description="Your Anki sync queue is empty.\nAnki同期キューは空です。",
+            color=discord.Color.gray()
+        )
+    else:
+        cards_list = "\n".join(f"• {card['front']}" for card in pending[:15])
+        if len(pending) > 15:
+            cards_list += f"\n... and {len(pending) - 15} more"
+
+        embed = discord.Embed(
+            title=f"📬 Pending Cards / 保留中のカード ({len(pending)})",
+            description=f"{cards_list}\n\nOpen Anki with the plugin to sync!\nAnkiとプラグインを開いて同期！",
+            color=discord.Color.blue()
+        )
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="anki_clear", description="Clear pending Anki cards / 保留中のAnkiカードをクリア")
+async def anki_clear(interaction: discord.Interaction):
+    """Clear all pending cards"""
+    pending = get_pending_cards(interaction.user.id)
+    count = len(pending)
+
+    clear_pending_cards(interaction.user.id)
+
+    embed = discord.Embed(
+        title="🗑️ Queue Cleared / キュークリア完了",
+        description=f"Cleared {count} pending card(s).\n{count}件の保留カードをクリアしました。",
+        color=discord.Color.orange()
+    )
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="anki_reset", description="Reset your Anki token (generates new one) / Ankiトークンをリセット")
+async def anki_reset(interaction: discord.Interaction):
+    """Generate a new token, invalidating the old one"""
+    token = generate_user_token(interaction.user.id)
+
+    embed = discord.Embed(
+        title="🔄 Token Reset / トークンリセット完了",
+        description=(
+            f"Your new token:\n```{token}```\n\n"
+            "Update this in your Anki plugin settings.\n"
+            "Ankiプラグインの設定を更新してください。\n\n"
+            "⚠️ Your old token no longer works!"
+        ),
+        color=discord.Color.orange()
+    )
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ============ Anki Sync HTTP API ============
+
+from aiohttp import web
+
+async def handle_get_cards(request):
+    """API endpoint: Get pending cards for a token"""
+    token = request.query.get('token')
+
+    if not token:
+        return web.json_response({'error': 'Missing token'}, status=400)
+
+    user_id = get_user_by_token(token)
+    if not user_id:
+        return web.json_response({'error': 'Invalid token'}, status=401)
+
+    cards = get_pending_cards(user_id)
+    return web.json_response({'cards': cards})
+
+
+async def handle_confirm_cards(request):
+    """API endpoint: Confirm cards have been synced"""
+    token = request.query.get('token')
+
+    if not token:
+        return web.json_response({'error': 'Missing token'}, status=400)
+
+    user_id = get_user_by_token(token)
+    if not user_id:
+        return web.json_response({'error': 'Invalid token'}, status=401)
+
+    try:
+        data = await request.json()
+        card_ids = data.get('card_ids', [])
+    except:
+        card_ids = []
+
+    if card_ids:
+        clear_pending_cards(user_id, card_ids)
+    else:
+        clear_pending_cards(user_id)
+
+    return web.json_response({'status': 'ok'})
+
+
+async def handle_health(request):
+    """Health check endpoint"""
+    return web.json_response({'status': 'ok', 'service': 'lain-anki-sync'})
+
+
+def create_api_app():
+    """Create the aiohttp web application for the API"""
+    app = web.Application()
+    app.router.add_get('/anki/cards', handle_get_cards)
+    app.router.add_post('/anki/confirm', handle_confirm_cards)
+    app.router.add_get('/health', handle_health)
+    return app
+
+
+async def start_api_server():
+    """Start the HTTP API server"""
+    app = create_api_app()
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    # Get port from environment or use default
+    port = int(os.getenv('ANKI_API_PORT', 8765))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"Anki Sync API running on port {port}")
+    return runner
+
+
+async def main():
+    """Run both the Discord bot and HTTP API"""
+    # Start the API server
+    api_runner = await start_api_server()
+
+    try:
+        # Start the Discord bot
+        await bot.start(TOKEN)
+    finally:
+        # Cleanup
+        await api_runner.cleanup()
+
+
 if __name__ == "__main__":
     if not TOKEN:
         print("Error: DISCORD_TOKEN not found in .env file")
         exit(1)
-    bot.run(TOKEN)
+    asyncio.run(main())

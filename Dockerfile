@@ -11,4 +11,7 @@ RUN mkdir -p /app/data
 COPY bot.py .
 COPY kradfile-u .
 
+# Expose the Anki sync API port
+EXPOSE 8765
+
 CMD ["python", "bot.py"]
