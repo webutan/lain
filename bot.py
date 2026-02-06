@@ -1036,7 +1036,8 @@ async def help_command(interaction: discord.Interaction):
 
     # Lookup section
     lookup = (
-        "**/jisho** `<word>` - Look up a word in the dictionary\n"
+        "**/jisho** `<word>` - Look up in EN-JP dictionary\n"
+        "**/weblio** `<word>` - 国語辞典 (JP-JP dictionary)\n"
         "**/kanji** `<kanji>` - Get kanji info + stroke order\n"
         "**/pitch** `<word>` - Get pitch accent + audio\n"
         "**/translate** `<text>` - Translate JP↔EN\n"
@@ -2884,6 +2885,186 @@ async def jisho_lookup(interaction: discord.Interaction, word: str):
         color=discord.Color.orange(),
         url=jisho_url
     )
+
+    await interaction.followup.send(embed=embed)
+
+
+# ============ Weblio Japanese Dictionary ============
+
+async def weblio_search(word):
+    """Search Weblio for a Japanese word (monolingual dictionary)"""
+    import urllib.parse
+    encoded_word = urllib.parse.quote(word)
+    url = f"https://www.weblio.jp/content/{encoded_word}"
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as response:
+                if response.status != 200:
+                    return None
+                html = await response.text()
+                return parse_weblio_html(html, word)
+    except Exception as e:
+        print(f"Weblio search error: {e}")
+        return None
+
+
+def parse_weblio_html(html, search_word):
+    """Parse Weblio HTML to extract definitions"""
+    results = []
+
+    # Find the main content sections (kiji = article sections)
+    # Weblio uses <div class="kiji"> for definition blocks
+
+    # Extract headword and reading from NetDicHead
+    headword = search_word
+    reading = ""
+
+    # Try to find the headword with reading
+    import re
+
+    # Look for the main word header
+    head_match = re.search(r'<h2[^>]*class="midashigo"[^>]*>([^<]+)</h2>', html)
+    if head_match:
+        headword = head_match.group(1).strip()
+
+    # Look for reading in ruby or parentheses
+    reading_match = re.search(r'【([^】]+)】', html)
+    if reading_match:
+        reading = reading_match.group(1).strip()
+
+    # Extract definitions from Weblio's structure
+    # Look for definition content in NetDicBody
+    definitions = []
+
+    # Pattern 1: Look for numbered definitions
+    def_pattern = re.compile(
+        r'<li[^>]*>(?:<span[^>]*>[①-⑳㊀-㊉\d]+</span>)?([^<]+(?:<[^>]+>[^<]*</[^>]+>)*[^<]*)</li>',
+        re.DOTALL
+    )
+
+    # Pattern 2: Look for content in kiji divs (definition areas)
+    kiji_pattern = re.compile(
+        r'<div[^>]*class="[^"]*kiji[^"]*"[^>]*>(.*?)</div>',
+        re.DOTALL
+    )
+
+    kiji_matches = kiji_pattern.findall(html)
+
+    for kiji in kiji_matches[:3]:  # Limit to first 3 sections
+        # Clean HTML tags
+        clean_text = re.sub(r'<script[^>]*>.*?</script>', '', kiji, flags=re.DOTALL)
+        clean_text = re.sub(r'<style[^>]*>.*?</style>', '', clean_text, flags=re.DOTALL)
+        clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
+        clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+
+        if clean_text and len(clean_text) > 10 and len(clean_text) < 500:
+            definitions.append(clean_text)
+
+    # If no definitions found via kiji, try alternative patterns
+    if not definitions:
+        # Look for definition text in NetDicBody
+        body_pattern = re.compile(
+            r'class="NetDicBody"[^>]*>(.*?)</td>',
+            re.DOTALL
+        )
+        body_matches = body_pattern.findall(html)
+
+        for body in body_matches[:3]:
+            clean_text = re.sub(r'<script[^>]*>.*?</script>', '', body, flags=re.DOTALL)
+            clean_text = re.sub(r'<style[^>]*>.*?</style>', '', clean_text, flags=re.DOTALL)
+            clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
+            clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+
+            if clean_text and len(clean_text) > 10 and len(clean_text) < 500:
+                definitions.append(clean_text)
+
+    # Try one more pattern - Weblio's main definition area
+    if not definitions:
+        main_pattern = re.compile(
+            r'<div class="Sgkdj"[^>]*>(.*?)</div>',
+            re.DOTALL
+        )
+        main_matches = main_pattern.findall(html)
+
+        for main in main_matches[:3]:
+            clean_text = re.sub(r'<[^>]+>', ' ', main)
+            clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+
+            if clean_text and len(clean_text) > 5 and len(clean_text) < 500:
+                definitions.append(clean_text)
+
+    if not definitions:
+        return None
+
+    return {
+        'word': headword,
+        'reading': reading,
+        'definitions': definitions[:5],  # Max 5 definitions
+        'search_word': search_word
+    }
+
+
+@bot.tree.command(name="weblio", description="国語辞典で単語を検索 / Look up a word in Japanese dictionary")
+@app_commands.describe(word="検索する単語 / The word to look up")
+async def weblio_lookup(interaction: discord.Interaction, word: str):
+    """Look up a word in Weblio's Japanese dictionary (monolingual)"""
+    await interaction.response.defer()
+
+    result = await weblio_search(word)
+
+    if not result or not result.get('definitions'):
+        import urllib.parse
+        weblio_url = f"https://www.weblio.jp/content/{urllib.parse.quote(word)}"
+
+        embed = discord.Embed(
+            title="❌ 見つかりません / Not Found",
+            description=(
+                f"「**{word}**」の定義が見つかりませんでした。\n"
+                f"Could not find definitions for **{word}**.\n\n"
+                f"[Weblioで直接検索 →]({weblio_url})"
+            ),
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+        return
+
+    # Build embed
+    import urllib.parse
+    weblio_url = f"https://www.weblio.jp/content/{urllib.parse.quote(word)}"
+
+    headword = result.get('word', word)
+    reading = result.get('reading', '')
+
+    if reading:
+        title = f"📕 {headword}【{reading}】"
+    else:
+        title = f"📕 {headword}"
+
+    # Format definitions
+    definitions = result.get('definitions', [])
+    description = ""
+
+    for i, defn in enumerate(definitions, 1):
+        # Truncate long definitions
+        if len(defn) > 200:
+            defn = defn[:197] + "..."
+        description += f"**{i}.** {defn}\n\n"
+
+    description += f"[**Weblioで詳しく見る →**]({weblio_url})"
+
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=discord.Color.dark_red(),
+        url=weblio_url
+    )
+
+    embed.set_footer(text="国語辞典 (Japanese Dictionary) • Weblio")
 
     await interaction.followup.send(embed=embed)
 
