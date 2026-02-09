@@ -3,7 +3,7 @@ import re
 import random
 import asyncio
 import json
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 import aiohttp
 import discord
@@ -187,6 +187,146 @@ def clear_pending_cards(user_id, card_ids=None):
     else:
         pending[user_id_str] = [c for c in pending[user_id_str] if c.get('id') not in card_ids]
     save_anki_pending(pending)
+
+
+# ============ Anki Stats & Streak Storage ============
+
+ANKI_STATS_FILE = DATA_DIR / "anki_stats.json"
+ANKI_STREAKS_FILE = DATA_DIR / "anki_streaks.json"
+
+
+def init_anki_stats_storage():
+    """Initialize Anki stats and streak storage files"""
+    if not ANKI_STATS_FILE.exists():
+        with open(ANKI_STATS_FILE, 'w', encoding='utf-8') as f:
+            json.dump({}, f)
+    if not ANKI_STREAKS_FILE.exists():
+        with open(ANKI_STREAKS_FILE, 'w', encoding='utf-8') as f:
+            json.dump({}, f)
+
+
+init_anki_stats_storage()
+
+
+def format_study_time(seconds: int) -> str:
+    """Format seconds into a readable time string"""
+    if seconds < 60:
+        return f"{seconds}s"
+    elif seconds < 3600:
+        minutes = seconds // 60
+        return f"{minutes}m"
+    else:
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        if minutes > 0:
+            return f"{hours}h {minutes}m"
+        return f"{hours}h"
+
+
+def load_anki_stats():
+    """Load Anki stats for all users"""
+    try:
+        with open(ANKI_STATS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError, FileNotFoundError):
+        return {}
+
+
+def save_anki_stats(stats):
+    """Save Anki stats"""
+    with open(ANKI_STATS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(stats, f, ensure_ascii=False, indent=2)
+
+
+def get_user_anki_stats(user_id):
+    """Get Anki stats for a specific user"""
+    stats = load_anki_stats()
+    return stats.get(str(user_id), {})
+
+
+def update_user_anki_stats(user_id, stats_data):
+    """Update Anki stats for a specific user"""
+    stats = load_anki_stats()
+    user_id_str = str(user_id)
+    if user_id_str not in stats:
+        stats[user_id_str] = {}
+    stats[user_id_str].update(stats_data)
+    stats[user_id_str]['last_update'] = datetime.now(ZoneInfo("UTC")).isoformat()
+    save_anki_stats(stats)
+
+
+def load_anki_streaks():
+    """Load Anki streak data for all users"""
+    try:
+        with open(ANKI_STREAKS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError, FileNotFoundError):
+        return {}
+
+
+def save_anki_streaks(streaks):
+    """Save Anki streak data"""
+    with open(ANKI_STREAKS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(streaks, f, ensure_ascii=False, indent=2)
+
+
+def get_user_streak(user_id):
+    """Get streak data for a specific user"""
+    streaks = load_anki_streaks()
+    return streaks.get(str(user_id), {
+        'current_streak': 0,
+        'longest_streak': 0,
+        'last_completed_date': None,
+        'total_reviews': 0,
+        'total_new_cards': 0
+    })
+
+
+def update_user_streak(user_id, completed_today, reviews_done=0, new_cards_done=0):
+    """Update streak for a user based on whether they completed today's reviews"""
+    streaks = load_anki_streaks()
+    user_id_str = str(user_id)
+
+    if user_id_str not in streaks:
+        streaks[user_id_str] = {
+            'current_streak': 0,
+            'longest_streak': 0,
+            'last_completed_date': None,
+            'total_reviews': 0,
+            'total_new_cards': 0
+        }
+
+    user_streak = streaks[user_id_str]
+    today = datetime.now(ZoneInfo("UTC")).strftime("%Y-%m-%d")
+    yesterday = (datetime.now(ZoneInfo("UTC")) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # Update totals
+    user_streak['total_reviews'] += reviews_done
+    user_streak['total_new_cards'] += new_cards_done
+
+    if completed_today:
+        last_completed = user_streak.get('last_completed_date')
+
+        # If already completed today, don't increment again
+        if last_completed == today:
+            save_anki_streaks(streaks)
+            return user_streak
+
+        # Check if this continues the streak (completed yesterday) or starts new
+        if last_completed == yesterday:
+            user_streak['current_streak'] += 1
+        elif last_completed != today:
+            # Streak was broken, start fresh
+            user_streak['current_streak'] = 1
+
+        user_streak['last_completed_date'] = today
+
+        # Update longest streak
+        if user_streak['current_streak'] > user_streak['longest_streak']:
+            user_streak['longest_streak'] = user_streak['current_streak']
+
+    save_anki_streaks(streaks)
+    return user_streak
 
 
 # Import secrets for token generation
@@ -670,10 +810,12 @@ async def find_bot_word(start_kana, used_words):
 # Role IDs
 COLLECTIVE_ROLE_ID = 1468122871535636551
 DIARY_ROLE_ID = 1467457169770156215
+ANKI_REMINDER_ROLE_ID = 1470359497271808040
 
 # Channel IDs
 DIARY_CHANNEL_ID = 1462768338563366975
 WELCOME_CHANNEL_ID = 1462769962480308363
+ANKI_STREAK_CHANNEL_ID = 1468129544501330031
 
 # Timezone
 JAPAN_TZ = ZoneInfo("Asia/Tokyo")
@@ -809,12 +951,71 @@ class DiaryRoleSelect(discord.ui.Select):
             )
 
 
+class AnkiReminderRoleSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(
+                label="Join Anki Reminders / Ankiリマインダー参加",
+                value="join",
+                emoji="📚",
+                description="Get pinged when you have cards due"
+            ),
+            discord.SelectOption(
+                label="Leave Anki Reminders / Ankiリマインダー退出",
+                value="leave",
+                emoji="❌",
+                description="Stop receiving Anki reminders"
+            ),
+        ]
+        super().__init__(
+            placeholder="Anki Reminders / Ankiリマインダー",
+            options=options,
+            custom_id="anki_reminder_role_select",
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not ANKI_REMINDER_ROLE_ID:
+            await interaction.response.send_message(
+                "Anki reminder role is not configured yet. Please contact an administrator.\n"
+                "Ankiリマインダーロールが設定されていません。管理者に連絡してください。",
+                ephemeral=True,
+            )
+            return
+
+        guild = interaction.guild
+        member = interaction.user
+        role = guild.get_role(ANKI_REMINDER_ROLE_ID)
+
+        if not role:
+            await interaction.response.send_message(
+                "Role not found. Please contact an administrator.",
+                ephemeral=True,
+            )
+            return
+
+        if self.values[0] == "join":
+            await member.add_roles(role)
+            await interaction.response.send_message(
+                "You've joined Anki Reminders! Set up your Anki plugin to receive pings.\n"
+                "Ankiリマインダーに参加しました！Ankiプラグインを設定してください。",
+                ephemeral=True,
+            )
+        else:
+            await member.remove_roles(role)
+            await interaction.response.send_message(
+                "You've left Anki Reminders.\n"
+                "Ankiリマインダーから退出しました。",
+                ephemeral=True,
+            )
+
+
 class RoleAssignView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(EnglishLevelSelect())
         self.add_item(JapaneseLevelSelect())
         self.add_item(DiaryRoleSelect())
+        self.add_item(AnkiReminderRoleSelect())
 
 
 class JapaneseLearningBot(discord.Client):
@@ -890,6 +1091,174 @@ async def daily_diary_task():
 
 @daily_diary_task.before_loop
 async def before_daily_diary():
+    """Wait until the bot is ready before starting the task"""
+    await bot.wait_until_ready()
+
+
+# ============ Anki Reminder & Leaderboard Tasks ============
+
+@tasks.loop(minutes=1)
+async def anki_reminder_check_task():
+    """Check if any users need Anki reminders based on their configured reminder time"""
+    if not ANKI_REMINDER_ROLE_ID:
+        return
+
+    stats = load_anki_stats()
+    now_utc = datetime.now(ZoneInfo("UTC"))
+
+    for user_id_str, user_stats in stats.items():
+        reminder_time = user_stats.get('reminder_time')
+        timezone_offset = user_stats.get('timezone_offset', 0)
+        due_today = user_stats.get('due_today', 0)
+        tracked_decks = user_stats.get('tracked_decks', [])
+        last_reminder = user_stats.get('last_reminder_date')
+
+        # Skip if no reminder time configured or no tracked decks
+        if not reminder_time or not tracked_decks:
+            continue
+
+        # Skip if no cards due
+        if due_today == 0:
+            continue
+
+        # Calculate user's local time
+        user_tz = ZoneInfo("UTC")  # We'll use offset manually
+        user_local = now_utc + timedelta(hours=timezone_offset)
+        user_time_str = user_local.strftime("%H:%M")
+        user_date_str = user_local.strftime("%Y-%m-%d")
+
+        # Check if it's reminder time (within 1 minute window)
+        if user_time_str == reminder_time:
+            # Don't remind twice on same day
+            if last_reminder == user_date_str:
+                continue
+
+            # Mark that we sent reminder today
+            update_user_anki_stats(user_id_str, {'last_reminder_date': user_date_str})
+
+            # Find the user and ping them
+            for guild in bot.guilds:
+                member = guild.get_member(int(user_id_str))
+                if member:
+                    # Check if they have the reminder role
+                    role = guild.get_role(ANKI_REMINDER_ROLE_ID)
+                    if role and role in member.roles:
+                        channel = bot.get_channel(ANKI_STREAK_CHANNEL_ID)
+                        if channel:
+                            await channel.send(
+                                f"📚 {member.mention} You have **{due_today} cards** due in your tracked decks! "
+                                f"Don't break your streak!\n"
+                                f"あなたの追跡デッキに **{due_today}枚** のカードが残っています！"
+                            )
+                    break
+
+
+@anki_reminder_check_task.before_loop
+async def before_anki_reminder_check():
+    """Wait until the bot is ready before starting the task"""
+    await bot.wait_until_ready()
+
+
+# Daily Anki leaderboard - runs at 10 AM Japan time (shows TODAY's stats)
+@tasks.loop(time=time(hour=10, minute=0, tzinfo=JAPAN_TZ))
+async def daily_anki_leaderboard_task():
+    """Post daily Anki leaderboard with today's stats"""
+    channel = bot.get_channel(ANKI_STREAK_CHANNEL_ID)
+    if not channel:
+        print(f"Anki streak channel {ANKI_STREAK_CHANNEL_ID} not found")
+        return
+
+    stats = load_anki_stats()
+    streaks = load_anki_streaks()
+
+    # Build leaderboard data (TODAY's stats)
+    streak_leaders = []  # (username, streak, time_today)
+    new_card_leaders = []  # (username, new_cards, time_today)
+    shame_leaders = []  # (username, due_cards, time_today)
+
+    for user_id_str, user_stats in stats.items():
+        tracked_decks = user_stats.get('tracked_decks', [])
+        if not tracked_decks:
+            continue
+
+        user_id = int(user_id_str)
+        user_streak = streaks.get(user_id_str, {})
+        current_streak = user_streak.get('current_streak', 0)
+        due_today = user_stats.get('due_today', 0)
+        new_today = user_stats.get('new_today', 0)
+        time_today = user_stats.get('time_today', 0)  # seconds
+
+        # Find username
+        username = None
+        for guild in bot.guilds:
+            member = guild.get_member(user_id)
+            if member:
+                username = member.display_name
+                break
+
+        if not username:
+            continue
+
+        # Track streaks (only users with active streaks)
+        if current_streak > 0:
+            streak_leaders.append((username, current_streak, time_today))
+
+        # Track new cards done today
+        if new_today > 0:
+            new_card_leaders.append((username, new_today, time_today))
+
+        # Track shame leaderboard - users with cards due
+        if due_today > 0:
+            shame_leaders.append((username, due_today, time_today))
+
+    # Sort leaderboards by their primary metric
+    streak_leaders.sort(key=lambda x: x[1], reverse=True)
+    new_card_leaders.sort(key=lambda x: x[1], reverse=True)
+    shame_leaders.sort(key=lambda x: x[1], reverse=True)  # Most due cards first
+
+    # Build embed
+    japan_now = datetime.now(JAPAN_TZ)
+    date_str = japan_now.strftime("%Y年%m月%d日")
+
+    embed = discord.Embed(
+        title=f"📊 Today's Anki Report / 今日のAnki日報 - {date_str}",
+        description="Use `/anki_leaderboard` to see all-time stats!\n`/anki_leaderboard`で累計ランキングを見よう！",
+        color=discord.Color.gold()
+    )
+
+    # Streak leaderboard with time studied
+    if streak_leaders:
+        streak_text = "\n".join([
+            f"{'🥇' if i == 0 else '🥈' if i == 1 else '🥉' if i == 2 else '🔥'} **{name}** ({format_study_time(time_studied)}): {streak} day{'s' if streak != 1 else ''}"
+            for i, (name, streak, time_studied) in enumerate(streak_leaders[:10])
+        ])
+        embed.add_field(name="🔥 Streak Leaders / ストリークランキング", value=streak_text, inline=False)
+
+    # New cards leaderboard with time studied
+    if new_card_leaders:
+        new_text = "\n".join([
+            f"{'🥇' if i == 0 else '🥈' if i == 1 else '🥉' if i == 2 else '📚'} **{name}** ({format_study_time(time_studied)}): {cards} new card{'s' if cards != 1 else ''}"
+            for i, (name, cards, time_studied) in enumerate(new_card_leaders[:10])
+        ])
+        embed.add_field(name="📚 New Cards Today / 今日の新規カード", value=new_text, inline=False)
+
+    # Shame leaderboard with time studied
+    if shame_leaders:
+        shame_text = "\n".join([
+            f"{'💀' if i == 0 else '☠️' if i == 1 else '👻' if i == 2 else '😱'} **{name}** ({format_study_time(time_studied)}): {due} card{'s' if due != 1 else ''} due"
+            for i, (name, due, time_studied) in enumerate(shame_leaders[:10])
+        ])
+        embed.add_field(name="😈 Wall of Shame / 恥の壁", value=shame_text, inline=False)
+
+    if not streak_leaders and not new_card_leaders and not shame_leaders:
+        embed.description = "No Anki activity tracked today. Connect your Anki to start tracking!\n今日のAnki活動はありません。Ankiを接続して追跡を開始しましょう！"
+
+    await channel.send(embed=embed)
+    print(f"Posted daily Anki leaderboard for {date_str}")
+
+
+@daily_anki_leaderboard_task.before_loop
+async def before_daily_anki_leaderboard():
     """Wait until the bot is ready before starting the task"""
     await bot.wait_until_ready()
 
@@ -980,6 +1349,16 @@ async def on_ready():
         daily_waaduru_reset_task.start()
         print("Daily Waaduru reset task started")
 
+    # Start the Anki reminder check task
+    if not anki_reminder_check_task.is_running():
+        anki_reminder_check_task.start()
+        print("Anki reminder check task started")
+
+    # Start the daily Anki leaderboard task
+    if not daily_anki_leaderboard_task.is_running():
+        daily_anki_leaderboard_task.start()
+        print("Daily Anki leaderboard task started")
+
     print("------")
 
 
@@ -1058,9 +1437,9 @@ async def help_command(interaction: discord.Interaction):
     anki_help = (
         "**/anki_setup** - Get your Anki sync token\n"
         "**/anki_add** `<#>` - Add memo to Anki queue\n"
-        "**/anki_add** `all` - Add all memos to queue\n"
         "**/anki_pending** - View pending cards\n"
-        "**/anki_clear** - Clear pending cards"
+        "**/anki_streak** - Check your study streak\n"
+        "**/anki_leaderboard** - All-time leaderboards"
     )
     embed.add_field(name="Anki Sync / Anki同期", value=anki_help, inline=False)
 
@@ -3707,6 +4086,171 @@ async def anki_reset(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+@bot.tree.command(name="anki_streak", description="Check your Anki streak / Ankiストリークを確認")
+async def anki_streak(interaction: discord.Interaction):
+    """Show user's Anki streak and stats"""
+    streak = get_user_streak(interaction.user.id)
+    stats = get_user_anki_stats(interaction.user.id)
+
+    current = streak.get('current_streak', 0)
+    longest = streak.get('longest_streak', 0)
+    total_reviews = streak.get('total_reviews', 0)
+    total_new = streak.get('total_new_cards', 0)
+    tracked_decks = stats.get('tracked_decks', [])
+    due_today = stats.get('due_today', 0)
+    reviewed_today = stats.get('reviewed_today', 0)
+
+    # Build streak display
+    streak_emoji = "🔥" * min(current, 10) if current > 0 else "❄️"
+
+    embed = discord.Embed(
+        title=f"📊 {interaction.user.display_name}'s Anki Stats",
+        color=discord.Color.gold() if current > 0 else discord.Color.greyple()
+    )
+
+    embed.add_field(
+        name="🔥 Current Streak / 現在のストリーク",
+        value=f"**{current}** day{'s' if current != 1 else ''}\n{streak_emoji}",
+        inline=True
+    )
+
+    embed.add_field(
+        name="🏆 Longest Streak / 最長ストリーク",
+        value=f"**{longest}** day{'s' if longest != 1 else ''}",
+        inline=True
+    )
+
+    embed.add_field(
+        name="📈 Today / 今日",
+        value=f"Reviewed: **{reviewed_today}**\nDue: **{due_today}**",
+        inline=True
+    )
+
+    embed.add_field(
+        name="📚 All Time / 累計",
+        value=f"Reviews: **{total_reviews}**\nNew Cards: **{total_new}**",
+        inline=True
+    )
+
+    if tracked_decks:
+        embed.add_field(
+            name="📂 Tracked Decks / 追跡デッキ",
+            value="\n".join(f"• {deck}" for deck in tracked_decks[:5]) +
+                  (f"\n... +{len(tracked_decks) - 5} more" if len(tracked_decks) > 5 else ""),
+            inline=False
+        )
+    else:
+        embed.add_field(
+            name="⚠️ No Decks Tracked",
+            value="Configure tracked decks in your Anki plugin to start tracking your streak!\n"
+                  "Ankiプラグインで追跡デッキを設定してストリークを記録しましょう！",
+            inline=False
+        )
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="anki_leaderboard", description="View all-time Anki leaderboards / 累計Ankiランキング")
+async def anki_leaderboard(interaction: discord.Interaction):
+    """Show all-time Anki leaderboards"""
+    await interaction.response.defer()
+
+    stats = load_anki_stats()
+    streaks = load_anki_streaks()
+
+    # Build ALL-TIME leaderboard data
+    streak_leaders = []  # (username, longest_streak, time_total)
+    review_leaders = []  # (username, total_reviews, time_total)
+    new_card_leaders = []  # (username, total_new_cards, time_total)
+    time_leaders = []  # (username, time_total)
+
+    for user_id_str, user_stats in stats.items():
+        tracked_decks = user_stats.get('tracked_decks', [])
+        if not tracked_decks:
+            continue
+
+        user_id = int(user_id_str)
+        user_streak = streaks.get(user_id_str, {})
+        longest_streak = user_streak.get('longest_streak', 0)
+        total_reviews = user_streak.get('total_reviews', 0)
+        total_new = user_streak.get('total_new_cards', 0)
+        time_total = user_stats.get('time_total', 0)  # seconds
+
+        # Find username
+        username = None
+        for guild in bot.guilds:
+            member = guild.get_member(user_id)
+            if member:
+                username = member.display_name
+                break
+
+        if not username:
+            continue
+
+        # Track all-time stats
+        if longest_streak > 0:
+            streak_leaders.append((username, longest_streak, time_total))
+
+        if total_reviews > 0:
+            review_leaders.append((username, total_reviews, time_total))
+
+        if total_new > 0:
+            new_card_leaders.append((username, total_new, time_total))
+
+        if time_total > 0:
+            time_leaders.append((username, time_total))
+
+    # Sort leaderboards
+    streak_leaders.sort(key=lambda x: x[1], reverse=True)
+    review_leaders.sort(key=lambda x: x[1], reverse=True)
+    new_card_leaders.sort(key=lambda x: x[1], reverse=True)
+    time_leaders.sort(key=lambda x: x[1], reverse=True)
+
+    # Build embed
+    embed = discord.Embed(
+        title="🏆 All-Time Anki Leaderboard / 累計Ankiランキング",
+        description="Lifetime achievements across all tracked users",
+        color=discord.Color.gold()
+    )
+
+    # Longest streak leaderboard
+    if streak_leaders:
+        streak_text = "\n".join([
+            f"{'🥇' if i == 0 else '🥈' if i == 1 else '🥉' if i == 2 else '🔥'} **{name}** ({format_study_time(time_total)}): {streak} day{'s' if streak != 1 else ''}"
+            for i, (name, streak, time_total) in enumerate(streak_leaders[:10])
+        ])
+        embed.add_field(name="🔥 Longest Streaks / 最長ストリーク", value=streak_text, inline=False)
+
+    # Total reviews leaderboard
+    if review_leaders:
+        review_text = "\n".join([
+            f"{'🥇' if i == 0 else '🥈' if i == 1 else '🥉' if i == 2 else '📖'} **{name}** ({format_study_time(time_total)}): {reviews:,} reviews"
+            for i, (name, reviews, time_total) in enumerate(review_leaders[:10])
+        ])
+        embed.add_field(name="📖 Total Reviews / 累計レビュー", value=review_text, inline=False)
+
+    # Total new cards leaderboard
+    if new_card_leaders:
+        new_text = "\n".join([
+            f"{'🥇' if i == 0 else '🥈' if i == 1 else '🥉' if i == 2 else '📚'} **{name}** ({format_study_time(time_total)}): {cards:,} new cards"
+            for i, (name, cards, time_total) in enumerate(new_card_leaders[:10])
+        ])
+        embed.add_field(name="📚 Total New Cards / 累計新規カード", value=new_text, inline=False)
+
+    # Total time studied leaderboard
+    if time_leaders:
+        time_text = "\n".join([
+            f"{'🥇' if i == 0 else '🥈' if i == 1 else '🥉' if i == 2 else '⏱️'} **{name}**: {format_study_time(time_total)}"
+            for i, (name, time_total) in enumerate(time_leaders[:10])
+        ])
+        embed.add_field(name="⏱️ Total Study Time / 累計勉強時間", value=time_text, inline=False)
+
+    if not streak_leaders and not review_leaders:
+        embed.description = "No Anki activity tracked yet. Connect your Anki to start tracking!\nまだAnki活動がありません。Ankiを接続して追跡を開始しましょう！"
+
+    await interaction.followup.send(embed=embed)
+
+
 # ============ Anki Sync HTTP API ============
 
 from aiohttp import web
@@ -3756,11 +4300,125 @@ async def handle_health(request):
     return web.json_response({'status': 'ok', 'service': 'lain-anki-sync'})
 
 
+async def handle_post_stats(request):
+    """API endpoint: Receive stats from Anki plugin"""
+    token = request.query.get('token')
+
+    if not token:
+        return web.json_response({'error': 'Missing token'}, status=400)
+
+    user_id = get_user_by_token(token)
+    if not user_id:
+        return web.json_response({'error': 'Invalid token'}, status=401)
+
+    try:
+        data = await request.json()
+    except:
+        return web.json_response({'error': 'Invalid JSON'}, status=400)
+
+    # Extract stats from plugin
+    stats_data = {
+        'tracked_decks': data.get('tracked_decks', []),
+        'reminder_time': data.get('reminder_time'),
+        'timezone_offset': data.get('timezone_offset', 0),
+        'due_today': data.get('due_today', 0),
+        'reviewed_today': data.get('reviewed_today', 0),
+        'new_today': data.get('new_today', 0),
+        'time_today': data.get('time_today', 0),  # seconds studied today
+        'time_total': data.get('time_total', 0),  # seconds studied all-time
+        'completed': data.get('completed', False),
+    }
+
+    update_user_anki_stats(user_id, stats_data)
+
+    # Check if user completed all due cards today
+    if stats_data['completed'] and stats_data['due_today'] == 0:
+        # Update streak - they completed today!
+        update_user_streak(
+            user_id,
+            completed_today=True,
+            reviews_done=data.get('reviews_session', 0),
+            new_cards_done=data.get('new_session', 0)
+        )
+
+    return web.json_response({'status': 'ok'})
+
+
+async def handle_get_config(request):
+    """API endpoint: Get user's Anki config (tracked decks, reminder time)"""
+    token = request.query.get('token')
+
+    if not token:
+        return web.json_response({'error': 'Missing token'}, status=400)
+
+    user_id = get_user_by_token(token)
+    if not user_id:
+        return web.json_response({'error': 'Invalid token'}, status=401)
+
+    stats = get_user_anki_stats(user_id)
+
+    return web.json_response({
+        'tracked_decks': stats.get('tracked_decks', []),
+        'reminder_time': stats.get('reminder_time'),
+        'timezone_offset': stats.get('timezone_offset', 0),
+    })
+
+
+async def handle_post_config(request):
+    """API endpoint: Save user's Anki config"""
+    token = request.query.get('token')
+
+    if not token:
+        return web.json_response({'error': 'Missing token'}, status=400)
+
+    user_id = get_user_by_token(token)
+    if not user_id:
+        return web.json_response({'error': 'Invalid token'}, status=401)
+
+    try:
+        data = await request.json()
+    except:
+        return web.json_response({'error': 'Invalid JSON'}, status=400)
+
+    # Only save config fields
+    config_data = {}
+    if 'tracked_decks' in data:
+        config_data['tracked_decks'] = data['tracked_decks']
+    if 'reminder_time' in data:
+        config_data['reminder_time'] = data['reminder_time']
+    if 'timezone_offset' in data:
+        config_data['timezone_offset'] = data['timezone_offset']
+
+    if config_data:
+        update_user_anki_stats(user_id, config_data)
+
+    return web.json_response({'status': 'ok'})
+
+
+async def handle_get_streak(request):
+    """API endpoint: Get user's streak info"""
+    token = request.query.get('token')
+
+    if not token:
+        return web.json_response({'error': 'Missing token'}, status=400)
+
+    user_id = get_user_by_token(token)
+    if not user_id:
+        return web.json_response({'error': 'Invalid token'}, status=401)
+
+    streak = get_user_streak(user_id)
+    return web.json_response(streak)
+
+
 def create_api_app():
     """Create the aiohttp web application for the API"""
     app = web.Application()
     app.router.add_get('/anki/cards', handle_get_cards)
     app.router.add_post('/anki/confirm', handle_confirm_cards)
+    app.router.add_post('/anki/stats', handle_post_stats)
+    app.router.add_get('/anki/config', handle_get_config)
+    app.router.add_post('/anki/config', handle_post_config)
+    app.router.add_get('/anki/streak', handle_get_streak)
     app.router.add_get('/health', handle_health)
     return app
 
