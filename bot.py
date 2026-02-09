@@ -4160,9 +4160,8 @@ async def anki_leaderboard(interaction: discord.Interaction):
 
     # Build ALL-TIME leaderboard data
     streak_leaders = []  # (username, longest_streak, time_total)
-    review_leaders = []  # (username, total_reviews, time_total)
-    new_card_leaders = []  # (username, total_new_cards, time_total)
     time_leaders = []  # (username, time_total)
+    shame_leaders = []  # (username, due_cards, time_total)
 
     for user_id_str, user_stats in stats.items():
         tracked_decks = user_stats.get('tracked_decks', [])
@@ -4172,9 +4171,9 @@ async def anki_leaderboard(interaction: discord.Interaction):
         user_id = int(user_id_str)
         user_streak = streaks.get(user_id_str, {})
         longest_streak = user_streak.get('longest_streak', 0)
-        total_reviews = user_streak.get('total_reviews', 0)
-        total_new = user_streak.get('total_new_cards', 0)
-        time_total = user_stats.get('time_total', 0)  # seconds
+        current_streak = user_streak.get('current_streak', 0)
+        time_total = user_stats.get('time_total', 0)  # seconds (from Anki directly)
+        due_today = user_stats.get('due_today', 0)
 
         # Find username
         username = None
@@ -4187,24 +4186,23 @@ async def anki_leaderboard(interaction: discord.Interaction):
         if not username:
             continue
 
-        # Track all-time stats
-        if longest_streak > 0:
-            streak_leaders.append((username, longest_streak, time_total))
+        # Track all-time stats - use the best of longest or current streak
+        best_streak = max(longest_streak, current_streak)
+        if best_streak > 0:
+            streak_leaders.append((username, best_streak, time_total))
 
-        if total_reviews > 0:
-            review_leaders.append((username, total_reviews, time_total))
-
-        if total_new > 0:
-            new_card_leaders.append((username, total_new, time_total))
-
+        # Everyone with time_total shows up (this comes directly from Anki)
         if time_total > 0:
             time_leaders.append((username, time_total))
 
+        # Wall of shame - users with cards due
+        if due_today > 0:
+            shame_leaders.append((username, due_today, time_total))
+
     # Sort leaderboards
     streak_leaders.sort(key=lambda x: x[1], reverse=True)
-    review_leaders.sort(key=lambda x: x[1], reverse=True)
-    new_card_leaders.sort(key=lambda x: x[1], reverse=True)
     time_leaders.sort(key=lambda x: x[1], reverse=True)
+    shame_leaders.sort(key=lambda x: x[1], reverse=True)
 
     # Build embed
     embed = discord.Embed(
@@ -4219,23 +4217,7 @@ async def anki_leaderboard(interaction: discord.Interaction):
             f"{'🥇' if i == 0 else '🥈' if i == 1 else '🥉' if i == 2 else '🔥'} **{name}** ({format_study_time(time_total)}): {streak} day{'s' if streak != 1 else ''}"
             for i, (name, streak, time_total) in enumerate(streak_leaders[:10])
         ])
-        embed.add_field(name="🔥 Longest Streaks / 最長ストリーク", value=streak_text, inline=False)
-
-    # Total reviews leaderboard
-    if review_leaders:
-        review_text = "\n".join([
-            f"{'🥇' if i == 0 else '🥈' if i == 1 else '🥉' if i == 2 else '📖'} **{name}** ({format_study_time(time_total)}): {reviews:,} reviews"
-            for i, (name, reviews, time_total) in enumerate(review_leaders[:10])
-        ])
-        embed.add_field(name="📖 Total Reviews / 累計レビュー", value=review_text, inline=False)
-
-    # Total new cards leaderboard
-    if new_card_leaders:
-        new_text = "\n".join([
-            f"{'🥇' if i == 0 else '🥈' if i == 1 else '🥉' if i == 2 else '📚'} **{name}** ({format_study_time(time_total)}): {cards:,} new cards"
-            for i, (name, cards, time_total) in enumerate(new_card_leaders[:10])
-        ])
-        embed.add_field(name="📚 Total New Cards / 累計新規カード", value=new_text, inline=False)
+        embed.add_field(name="🔥 Best Streaks / 最長ストリーク", value=streak_text, inline=False)
 
     # Total time studied leaderboard
     if time_leaders:
@@ -4245,7 +4227,15 @@ async def anki_leaderboard(interaction: discord.Interaction):
         ])
         embed.add_field(name="⏱️ Total Study Time / 累計勉強時間", value=time_text, inline=False)
 
-    if not streak_leaders and not review_leaders:
+    # Wall of shame - users with most cards due
+    if shame_leaders:
+        shame_text = "\n".join([
+            f"{'💀' if i == 0 else '☠️' if i == 1 else '👻' if i == 2 else '😱'} **{name}** ({format_study_time(time_total)}): {due} card{'s' if due != 1 else ''} due"
+            for i, (name, due, time_total) in enumerate(shame_leaders[:10])
+        ])
+        embed.add_field(name="😈 Wall of Shame / 恥の壁", value=shame_text, inline=False)
+
+    if not streak_leaders and not time_leaders and not shame_leaders:
         embed.description = "No Anki activity tracked yet. Connect your Anki to start tracking!\nまだAnki活動がありません。Ankiを接続して追跡を開始しましょう！"
 
     await interaction.followup.send(embed=embed)
