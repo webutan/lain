@@ -69,53 +69,30 @@ def get_deck_stats(deck_names: List[str]) -> dict:
     total_due = 0
     total_new = 0
 
-    # Get deck IDs for tracked decks (including subdecks)
-    tracked_deck_ids = set()
+    # Get counts for each tracked deck using Anki's scheduler
     for deck_name in deck_names:
         deck_id = mw.col.decks.id_for_name(deck_name)
         if deck_id:
-            tracked_deck_ids.add(deck_id)
-            # Also add all child decks
-            for d in mw.col.decks.all_names_and_ids():
-                if d.name.startswith(deck_name + "::"):
-                    tracked_deck_ids.add(d.id)
+            try:
+                # Select the deck temporarily to get its counts
+                original_deck = mw.col.decks.current()['id']
+                mw.col.decks.select(deck_id)
 
-    # Get due counts using the deck tree
-    try:
-        # Get the full deck tree
-        tree = mw.col.sched.deck_due_tree()
+                # Get counts: (new, learning, review)
+                counts = mw.col.sched.counts()
+                total_new += counts[0]
+                total_due += counts[1] + counts[2]  # learning + review
 
-        def count_deck(node):
-            """Recursively count due cards in a deck and its children"""
-            due = 0
-            new = 0
-            if node.deck_id in tracked_deck_ids:
-                due += node.review_count + node.learn_count
-                new += node.new_count
-            for child in node.children:
-                child_due, child_new = count_deck(child)
-                due += child_due
-                new += child_new
-            return due, new
+                # Restore original deck
+                mw.col.decks.select(original_deck)
+            except Exception as e:
+                print(f"Lain Sync: Error getting counts for {deck_name}: {e}")
 
-        total_due, total_new = count_deck(tree)
-    except Exception as e:
-        print(f"Lain Sync: Error getting deck tree: {e}")
-        # Fallback: count cards directly from database
-        if tracked_deck_ids:
-            deck_id_list = ','.join(str(d) for d in tracked_deck_ids)
-            total_due = mw.col.db.scalar(
-                f"SELECT COUNT() FROM cards WHERE did IN ({deck_id_list}) AND queue IN (1, 2, 3)"
-            ) or 0
-            total_new = mw.col.db.scalar(
-                f"SELECT COUNT() FROM cards WHERE did IN ({deck_id_list}) AND queue = 0"
-            ) or 0
-
-    # Get today's review count and time
+    # Get today's stats from review log
     today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     today_timestamp = int(today_start.timestamp() * 1000)
 
-    # Count reviews done today (all decks for simplicity)
+    # Count reviews done today
     reviewed_today = mw.col.db.scalar(
         "SELECT COUNT() FROM revlog WHERE id > ?",
         today_timestamp
@@ -133,6 +110,8 @@ def get_deck_stats(deck_names: List[str]) -> dict:
         "SELECT SUM(time) FROM revlog"
     ) or 0
     time_total = time_total_ms // 1000  # Convert to seconds
+
+    print(f"Lain Sync Stats: due={total_due}, new={total_new}, reviewed={reviewed_today}, time_today={time_today}s, time_total={time_total}s")
 
     return {
         'due': total_due,
